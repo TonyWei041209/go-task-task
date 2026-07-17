@@ -21,7 +21,7 @@ type Task struct {
 	State      State
 	Action     func(ctx context.Context) error
 	Err        error
-	Metadata   map[string]interface{ }
+	Metadata   map[string]interface{}
 	History    []State
 	StartedAt  time.Time
 	FinishedAt time.Time
@@ -37,17 +37,37 @@ func NewTask(id string, action func(ctx context.Context) error) *Task {
 	}
 }
 
+// GetState returns the current state of the task.
 func (t *Task) GetState() State {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.State
 }
 
+// SetState updates the task's state and appends it to the history.
 func (t *Task) SetState(state State) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.State = state
 	t.History = append(t.History, state)
+}
+
+// TransitionTo is an atomic state-and-error transition.
+// It sets the state, appends to history, records the error,
+// and records FinishedAt if the state is a terminal one
+// (Completed or Failed).
+func (t *Task) TransitionTo(state State, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.State = state
+	t.History = append(t.History, state)
+	t.Err = err
+	if state == StateRunning {
+		t.StartedAt = time.Now()
+	}
+	if state == StateCompleted || state == StateFailed {
+		t.FinishedAt = time.Now()
+	}
 }
 
 func (t *Task) GetErr() error {

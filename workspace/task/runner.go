@@ -3,9 +3,9 @@ package task
 import (
 	"context"
 	"sync"
-	"time"
 )
 
+// Runner executes tasks concurrently.
 type Runner struct {
 	mu    sync.RWMutex
 	tasks []*Task
@@ -23,6 +23,34 @@ func (r *Runner) AddTask(t *Task) {
 	r.tasks = append(r.tasks, t)
 }
 
+// RunnerStatus contains a snapshot of the runner's task states.
+type RunnerStatus struct {
+	TaskID string
+	State  State
+	Err    error
+}
+
+// Status returns a thread-safe snapshot of every task's state and error.
+func (r *Runner) Status() []RunnerStatus {
+	r.mu.RLock()
+	snap := make([]*Task, len(r.tasks))
+	copy(snap, r.tasks)
+	r.mu.RUnlock()
+
+	results := make([]RunnerStatus, len(snap))
+	for i, t := range snap {
+		results[i] = RunnerStatus{
+			TaskID: t.ID,
+			State:  t.GetState(),
+			Err:    t.GetErr(),
+		}
+	}
+	return results
+}
+
+// Run executes all tasks concurrently. It uses the task's own public API
+// for thread-safe state transitions so that concurrent readers (e.g. the
+// race-detector test in runner_test.go) do not cause data races.
 func (r *Runner) Run(ctx context.Context) {
 	r.mu.RLock()
 	tasks := make([]*Task, len(r.tasks))
@@ -35,34 +63,21 @@ func (r *Runner) Run(ctx context.Context) {
 		go func(task *Task) {
 			defer wg.Done()
 
+			// Check whether the context has been cancelled before we start.
 			if ctx.Err() != nil {
-				task.mu.Lock()
-				task.State = StateFailed
-				task.Err = ctx.Err()
-				task.History = append(task.History, StateFailed)
-				task.mu.Unlock()
+				task.TransitionTo(StateFailed, ctx.Err())
 				return
 			}
 
-			task.mu.Lock()
-			task.State = StateRunning
-			task.StartedAt = time.Now()
-			task.History = append(task.History, StateRunning)
-			task.mu.Unlock()
+			task.TransitionTo(StateRunning, nil)
 
 			err := task.Action(ctx)
 
-			task.mu.Lock()
-			task.FinishedAt = time.Now()
 			if err != nil {
-				task.State = StateFailed
-				task.Err = err
-				task.History = append(task.History, StateFailed)
+				task.TransitionTo(StateFailed, err)
 			} else {
-				task.State = StateCompleted
-				task.History = append(task.History, StateCompleted)
+				task.TransitionTo(StateCompleted, nil)
 			}
-			task.mu.Unlock()
 		}(t)
 	}
 	wg.Wait()
